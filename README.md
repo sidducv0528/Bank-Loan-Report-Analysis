@@ -131,14 +131,14 @@ Built entirely with SQL aggregates and refined into Power BI DAX measures:
  
 ## 🗃 SQL Analysis
  
-All business logic lives in [`SQL Queries/Bank_Loan_All_SQL_Queries.sql`](<SQL Queries/Bank_Loan_All_SQL_Queries.sql>), organized to mirror the dashboard pages: **Summary KPIs → Good/Bad Loan splits → Loan Status → Overview segmentation** (by month, state, term, employment length, purpose, and home ownership).
+All business logic lives in [`SQL Queries/Bank_Loan_All_SQL_Queries.sql`](https://github.com/sidducv0528/Bank-Loan-Report-Analysis/blob/main/SQL%20Queries/Bank_Loan_All_SQL_Queries.sql), organized to mirror the dashboard pages: **Summary KPIs → Good/Bad Loan splits → Loan Status → Overview segmentation** (by month, state, term, employment length, purpose, and home ownership).
  
 **Sample — Good vs. Bad Loan segmentation:**
  
 ```sql
 -- Good Loan Percentage
 SELECT
-    (COUNT(CASE WHEN loan_status = 'Fully Paid' OR loan_status = 'Current' THEN id END) * 100.0) /
+    (COUNT(CASE WHEN loan_status IN ('Fully Paid', 'Current') THEN id END) * 100.0) /
     COUNT(id) AS Good_Loan_Percentage
 FROM bank_loan_data;
  
@@ -149,42 +149,73 @@ SELECT
 FROM bank_loan_data;
 ```
  
-**Sample — Monthly trend for the Overview page:**
+**Sample — Monthly trend with Month-over-Month change (CTE + window function):**
+ 
+```sql
+WITH monthly_summary AS (
+    SELECT
+        MONTH(issue_date)              AS month_number,
+        DATENAME(MONTH, issue_date)    AS month_name,
+        COUNT(id)                      AS total_applications,
+        SUM(loan_amount)               AS total_funded_amount,
+        SUM(total_payment)             AS total_amount_received
+    FROM bank_loan_data
+    GROUP BY MONTH(issue_date), DATENAME(MONTH, issue_date)
+)
+SELECT
+    month_name,
+    total_funded_amount,
+    LAG(total_funded_amount) OVER (ORDER BY month_number)              AS prior_month_funded,
+    total_funded_amount - LAG(total_funded_amount) OVER (ORDER BY month_number) AS mom_change
+FROM monthly_summary
+ORDER BY month_number;
+```
+ 
+*(Running this against the actual dataset: California, New York, and Texas top the state list by funded amount — $78.5M, $42.1M, and $31.3M respectively — together making up 34.8% of total funding.)*
+ 
+**Sample — Ranking states by risk exposure (window function):**
  
 ```sql
 SELECT
-    MONTH(issue_date) AS Month_Number,
-    DATENAME(MONTH, issue_date) AS Month_name,
-    COUNT(id) AS Total_Loan_Applications,
-    SUM(loan_amount) AS Total_Funded_Amount,
-    SUM(total_payment) AS Total_Amount_Received
+    address_state,
+    COUNT(id)                                                          AS total_loans,
+    COUNT(CASE WHEN loan_status = 'Charged Off' THEN id END)           AS bad_loans,
+    ROUND(COUNT(CASE WHEN loan_status = 'Charged Off' THEN id END) * 100.0
+        / COUNT(id), 2)                                                AS charge_off_rate,
+    RANK() OVER (
+        ORDER BY COUNT(CASE WHEN loan_status = 'Charged Off' THEN id END) * 1.0 / COUNT(id) DESC
+    ) AS risk_rank
 FROM bank_loan_data
-GROUP BY MONTH(issue_date), DATENAME(MONTH, issue_date)
-ORDER BY MONTH(issue_date);
+GROUP BY address_state
+ORDER BY risk_rank;
 ```
  
-**SQL concepts applied:** `SELECT` / `WHERE` / `GROUP BY` / `ORDER BY`, `CASE` expressions, aggregate functions, MTD/PMTD date filtering, and multi-dimension segmentation (state, term, purpose, employment length, home ownership, grade).
+**SQL concepts applied:** `SELECT` / `WHERE` / `GROUP BY` / `ORDER BY`, `CASE` expressions, aggregate functions, **CTEs**, **`LAG()`/`RANK()` window functions**, MTD/PMTD date filtering, and multi-dimension segmentation (state, term, purpose, employment length, home ownership, grade).
  
-A fully documented version of every query is also available in [`SQL Queries/Bank_Loan_SQL_Query_Document.docx`](<SQL Queries/Bank_Loan_SQL_Query_Document.docx>).
+A fully documented version of every query is also available in [`SQL Queries/Bank_Loan_SQL_Query_Document.docx`](https://github.com/sidducv0528/Bank-Loan-Report-Analysis/blob/main/SQL%20Queries/Bank_Loan_SQL_Query_Document.docx).
  
 ---
+ 
  
 ## 💡 Key Insights
  
-- The portfolio is **healthy overall** — loans marked `Fully Paid` or `Current` ("Good Loans") substantially outnumber `Charged Off` ("Bad Loans"), both in application count and funded amount.
-- **Debt Consolidation** is the single largest driver of loan volume by purpose, well ahead of categories like credit card refinancing or home improvement.
-- Funding activity is **not evenly distributed geographically** — a handful of states account for a disproportionate share of total funded amount.
-- **Shorter-term loans (36 months)** show different risk and repayment characteristics than **60-month loans**, visible in their respective interest rate and DTI profiles.
-- Borrowers with **longer employment history** and **verified income** trend toward better repayment outcomes than those with shorter tenure or unverified status.
-- **Average interest rate and DTI move together** — riskier loan grades correlate with higher borrowing costs, consistent with standard credit-risk pricing.
+- The portfolio is healthy overall — **86.2%** of loans (33,243) are `Fully Paid` or `Current` ("Good Loans") vs **13.8%** (5,333) `Charged Off` ("Bad Loans"), representing **$370.2M** vs **$65.5M** in funded amount respectively, out of **$435.8M** total funded and **$473.1M** total collected.
+- **Debt Consolidation** is by far the largest driver of loan volume by purpose, accounting for **47.2%** of total applications — nearly 4x the next-largest category, credit card refinancing (**13.0%**), with home improvement a distant third (**7.5%**).
+- Funding is geographically concentrated: the top 3 states — **California (18.0%)**, **New York (9.7%)**, and **Texas (7.2%)** — account for **34.8%** of total funded amount, roughly matching their **34.4%** share of applications (concentration here tracks population/application volume rather than disproportionate risk).
+- **60-month loans** carry a charge-off rate of **22.3%**, more than **2x** the **10.7%** rate on **36-month loans** — and they also average a **3.8 percentage-point higher interest rate** (14.8% vs 11.0%), confirming term length is one of the strongest risk signals in the portfolio.
+- Charge-off rate rises steadily and almost linearly by credit grade — from **5.7% at Grade A** to **31.3% at Grade G** — the cleanest risk signal in the dataset. Interest rate follows the same pattern (7.35% → 21.40%), consistent with standard credit-risk pricing.
+- **Correction to a common assumption:** longer employment history and verified income do **not** predict better repayment here — borrowers with **10+ years** tenure actually charge off slightly *more* (**14.9%**) than those with **<1 year** tenure (**13.8%**), and **"Verified"** borrowers charge off at **15.7%** vs **12.2%** for **"Not Verified"** borrowers. These fields appear to carry little independent predictive power in this dataset — grade and term are the dominant risk drivers, not tenure or verification status.
+- Monthly funded amount grew consistently through 2021, from **$25.0M in January to $54.0M in December** — a **~116% increase** over the year, with the strongest single-month jump in March (**+17.2%** MoM) and December (**+13.0%** MoM).
 ---
+ 
  
 ## ✅ Business Recommendations
  
-- Tighten underwriting criteria for segments showing elevated `Charged Off` rates (e.g. specific purposes, grades, or states).
-- Prioritize retention and cross-sell for the "Good Loan" segment — these borrowers are the portfolio's most profitable and lowest-risk base.
-- Monitor high-DTI applicants more closely before approval; DTI is a leading indicator of repayment risk in this dataset.
-- Introduce regional lending strategy reviews for states with high funded amounts but weaker collection performance.
+- **Re-price or restrict 60-month loans** — their charge-off rate (22.3%) is more than double that of 36-month loans (10.7%), the single clearest risk lever in the portfolio.
+- **Treat credit grade as the primary underwriting signal**, not employment tenure or income verification — grade shows a clean, near-linear relationship with charge-off rate (5.7% → 31.3% from A to G), while tenure and verification status show weak or counter-intuitive relationships in this dataset and should not be over-weighted in approval decisions.
+- **Re-examine the income verification process** — "Verified" borrowers currently charge off *more* (15.7%) than "Not Verified" borrowers (12.2%), which may indicate the verification step is being applied inconsistently, or is correlated with other risk factors (e.g. higher loan amounts) that should be modeled separately.
+- Prioritize retention and cross-sell for the "Good Loan" segment (86.2% of the book) — these borrowers are the portfolio's most profitable and lowest-risk base.
+- Given Debt Consolidation drives 47.2% of volume, build a purpose-specific risk model rather than treating all purposes uniformly — it's too large a segment to lump in with smaller categories.
 - Automate this report with a scheduled refresh so risk and lending teams always work from current data, not static exports.
 ---
  
